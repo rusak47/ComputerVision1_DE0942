@@ -1,6 +1,8 @@
 # Patched multi_image_deca.py
 # Fixed for handling multiple viewpoints (frontal + profile)
 # Fixed for texture extraction from input images
+# introduce Multi-View Texture Blending
+#  - Combines textures from multiple views to eliminate gaps
 
 import os, sys
 import cv2
@@ -10,6 +12,7 @@ from scipy.io import savemat
 import argparse
 from tqdm import tqdm
 import torch
+import torch.nn.functional as F
 
 from pathlib import Path
 
@@ -56,12 +59,84 @@ class MultiImageDECA:
         print(f"\nSelected image {best_idx + 1} as most frontal view")
         return best_idx
 
-    def reconstruct_multi_image(self, image_paths, output_dir, strategy='identity'):
+    def blend_multi_view_textures(self, all_opdicts, merged_verts):
+        """
+        Blend textures from multiple views to eliminate gaps.
+        Uses visibility weighting based on surface normals.
+        """
+        print("\n" + "=" * 60)
+        print("Blending textures from multiple views...")
+        print("=" * 60)
+
+        # Get UV size from first opdict
+        uv_size = all_opdicts[0]['uv_texture_gt'].shape[2]
+        device = all_opdicts[0]['uv_texture_gt'].device
+
+        # Initialize accumulators
+        blended_texture = torch.zeros((1, 3, uv_size, uv_size), device=device)
+        weight_sum = torch.zeros((1, 1, uv_size, uv_size), device=device)
+
+        for idx, opdict in enumerate(all_opdicts):
+            if 'uv_texture_gt' not in opdict:
+                print(f"  ⚠ View {idx + 1}: No texture data, skipping")
+                continue
+
+            # Get texture and normals for this view
+            texture = opdict['uv_texture_gt']  # [1, 3, H, W]
+
+            # Calculate visibility weight based on viewing angle
+            # Normals pointing toward camera (z > 0) get higher weight
+            if 'normals' in opdict:
+                normals = opdict['normals']  # [1, V, 3]
+
+                # Project normals to UV space
+                uv_normals = self.deca.render.world2uv(normals)  # [1, 3, H, W]
+
+                # Z component indicates how much surface faces camera
+                # Higher z = more frontal = higher weight
+                normal_z = uv_normals[:, 2:3, :, :]  # [1, 1, H, W]
+
+                # Soft threshold: surfaces facing camera get weight, others get 0
+                # Use sigmoid for smooth transition
+                weight = torch.sigmoid(normal_z * 5.0)  # Scale factor controls sharpness
+            else:
+                # Fallback: equal weights
+                weight = torch.ones((1, 1, uv_size, uv_size), device=device)
+
+            # Mask out black/background pixels (they shouldn't contribute)
+            texture_mask = (texture.sum(dim=1, keepdim=True) > 0.1).float()
+            weight = weight * texture_mask
+
+            # Accumulate weighted texture
+            blended_texture += texture * weight
+            weight_sum += weight
+
+            # Debug info
+            coverage = (weight > 0.1).float().mean().item() * 100
+            print(f"  ✓ View {idx + 1}: {coverage:.1f}% UV coverage")
+
+        # Normalize by total weights
+        weight_sum = torch.clamp(weight_sum, min=1e-6)  # Avoid division by zero
+        blended_texture = blended_texture / weight_sum
+
+        # Fill any remaining holes with mean texture
+        if hasattr(self.deca, 'mean_texture'):
+            holes_mask = (weight_sum < 0.1).float()
+            blended_texture = blended_texture * (1 - holes_mask) + self.deca.mean_texture * holes_mask
+
+        total_coverage = (weight_sum > 0.1).float().mean().item() * 100
+        print(f"\n✓ Total texture coverage: {total_coverage:.1f}%")
+        print("=" * 60)
+
+        return blended_texture
+
+    def reconstruct_multi_image(self, image_paths, output_dir, strategy='identity', blend_textures=True):
         """Reconstruct 3D face from multiple images"""
         os.makedirs(output_dir, exist_ok=True)
 
         all_codes = []
         all_images = []
+        all_opdicts = []
 
         print(f"Processing {len(image_paths)} images...")
         for idx, img_path in enumerate(image_paths):
@@ -72,6 +147,16 @@ class MultiImageDECA:
 
             with torch.no_grad():
                 codedict = self.deca.encode(image_tensor)
+
+                # Also decode each view to get its texture
+                opdict_single, _ = self.deca.decode(
+                    codedict,
+                    rendering=True,
+                    vis_lmk=True,
+                    return_vis=True,
+                    use_detail=True
+                )
+                all_opdicts.append(opdict_single)
 
             all_codes.append(codedict)
             all_images.append(image_tensor)
@@ -93,6 +178,14 @@ class MultiImageDECA:
                 use_detail=True
             )
 
+        # Blend textures from all views if enabled
+        if blend_textures and self.config.model.use_tex and len(all_opdicts) > 1:
+            blended_texture = self.blend_multi_view_textures(all_opdicts, opdict['verts'])
+            opdict['uv_texture_gt'] = blended_texture
+            print("✓ Applied multi-view texture blending")
+        else:
+            print("ℹ Using single-view texture (frontal)")
+
         # Debug: Print what's in opdict
         print("\nAvailable data in opdict:")
         for key in opdict.keys():
@@ -102,7 +195,7 @@ class MultiImageDECA:
                 print(f"  - {key}: {type(opdict[key])}")
 
         # Save results
-        self.save_results(opdict, visdict, output_dir, all_images)
+        self.save_results(opdict, visdict, output_dir, all_images, merged_code)
 
         # Also save individual reconstructions for comparison
         self.save_individual_results(all_codes, output_dir)
@@ -148,12 +241,11 @@ class MultiImageDECA:
             if 'tex' in merged:
                 textures = torch.stack([code['tex'] for code in all_codes])
                 merged['tex'] = textures.mean(dim=0)
-                print(f"  - Averaged texture from {len(all_codes)} views")
+                print(f"  - Averaged texture parameters from {len(all_codes)} views")
 
-            # Keep pose, expression, camera, light from frontal view
-            for key in ['pose', 'exp', 'cam', 'light']:
-                if key in frontal_code:
-                    merged[key] = frontal_code[key]
+            # Use frontal pose/expression to get canonical head position
+            merged['images'] = frontal_code['images']
+            print(f"  - Using frontal view (image {frontal_idx + 1}) for canonical pose")
 
         elif strategy == 'frontal':
             print("\nUsing 'frontal' merging strategy:")
@@ -186,88 +278,93 @@ class MultiImageDECA:
 
         for idx, codedict in enumerate(all_codes):
             with torch.no_grad():
-                opdict, visdict = self.deca.decode(codedict)
-
-            # Save mesh
-            if 'verts' in opdict:
-                faces = self.deca.render.faces[0].cpu().numpy()
-                obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
-                util.write_obj(
-                    obj_path,
-                    opdict['verts'][0].cpu().numpy(),
-                    faces
+                opdict, visdict = self.deca.decode(
+                    codedict,
+                    rendering=True,
+                    vis_lmk=True,
+                    return_vis=True,
+                    use_detail=True
                 )
+
+            # Save with DECA's save_obj method
+            if self.config.model.use_tex:
+                try:
+                    obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
+                    self.deca.save_obj(obj_path, opdict)
+                except Exception as e:
+                    print(f"  ⚠ View {idx + 1}: texture save failed - {e}")
+                    if 'verts' in opdict:
+                        faces = self.deca.render.faces[0].cpu().numpy()
+                        obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
+                        util.write_obj(obj_path, opdict['verts'][0].cpu().numpy(), faces)
+            else:
+                if 'verts' in opdict:
+                    faces = self.deca.render.faces[0].cpu().numpy()
+                    obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
+                    util.write_obj(obj_path, opdict['verts'][0].cpu().numpy(), faces)
 
             # Save visualization
-            if 'shape_images' in visdict:
-                shape_img = visdict['shape_images'][0].detach().cpu()
-                shape_img = shape_img.permute(1, 2, 0).numpy()
-                shape_img = np.clip(shape_img * 255, 0, 255).astype(np.uint8)
+            if 'shape_detail_images' in visdict:
+                detail_img = visdict['shape_detail_images'][0].detach().cpu()
+                detail_img = detail_img.permute(1, 2, 0).numpy()
+                detail_img = np.clip(detail_img * 255, 0, 255).astype(np.uint8)
                 cv2.imwrite(
-                    os.path.join(individual_dir, f'view_{idx + 1}_shape.png'),
-                    cv2.cvtColor(shape_img, cv2.COLOR_RGB2BGR)
+                    os.path.join(individual_dir, f'view_{idx + 1}_detail.png'),
+                    cv2.cvtColor(detail_img, cv2.COLOR_RGB2BGR)
                 )
 
-    def save_results(self, opdict, visdict, output_dir, images):
-        """Save reconstruction results"""
+    def save_results(self, opdict, visdict, output_dir, images, merged_code):
+        """Save reconstruction results with texture"""
 
-        print("\nSaving merged reconstruction results...")
+        print("\n" + "=" * 60)
+        print("Saving merged reconstruction results...")
+        print("=" * 60)
 
-        # Save mesh using DECA's method if texture is enabled
         output_path = os.path.join(output_dir, 'merged_mesh.obj')
 
         if self.config.model.use_tex:
-            try:
-                # Check if we have the required texture data
-                required_keys = ['verts', 'uv_texture_gt', 'uv_detail_normals', 'displacement_map', 'normals']
-                missing_keys = [key for key in required_keys if key not in opdict]
+            has_texture_data = 'uv_texture_gt' in opdict
+            has_detail_data = 'uv_detail_normals' in opdict and 'displacement_map' in opdict
+            has_normals = 'normals' in opdict
 
-                if missing_keys:
-                    print(f"⚠ Missing texture data: {missing_keys}")
-                    print("  Saving geometry-only mesh...")
-                    if 'verts' in opdict:
-                        faces = self.deca.render.faces[0].cpu().numpy()
-                        util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
-                        print(f"✓ Saved geometry-only mesh to {output_path}")
-                else:
-                    print("✓ All texture data present, saving with DECA's save_obj method...")
+            print(f"\nTexture data check:")
+            print(f"  - uv_texture_gt: {'✓' if has_texture_data else '✗'}")
+            print(f"  - detail/normals: {'✓' if has_detail_data and has_normals else '✗'}")
+
+            if has_texture_data and has_detail_data and has_normals:
+                try:
+                    print("\n✓ Saving textured mesh with DECA's save_obj...")
                     self.deca.save_obj(output_path, opdict)
-                    print(f"✓ Saved textured mesh to {output_path}")
-                    print(f"✓ Saved detailed mesh to {output_path.replace('.obj', '_detail.obj')}")
+                    print(f"✓ Saved: {output_path}")
+                    print(f"✓ Saved: {output_path.replace('.obj', '_detail.obj')}")
 
-                    # Also save the texture as a separate image file
-                    if 'uv_texture_gt' in opdict:
-                        texture = util.tensor2image(opdict['uv_texture_gt'][0])
-                        cv2.imwrite(
-                            os.path.join(output_dir, 'texture_map.png'),
-                            cv2.cvtColor(texture, cv2.COLOR_RGB2BGR)
-                        )
-                        print(f"✓ Saved texture map to texture_map.png")
+                    # Save texture as separate PNG
+                    texture = util.tensor2image(opdict['uv_texture_gt'][0])
+                    texture_path = os.path.join(output_dir, 'merged_texture.png')
+                    cv2.imwrite(texture_path, cv2.cvtColor(texture, cv2.COLOR_RGB2BGR))
+                    print(f"✓ Saved: {texture_path}")
 
-            except Exception as e:
-                print(f"⚠ Error saving textured obj: {e}")
-                import traceback
-                traceback.print_exc()
-                print("  Falling back to geometry-only save...")
-                if 'verts' in opdict:
-                    faces = self.deca.render.faces[0].cpu().numpy()
-                    util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
-                    print(f"✓ Saved geometry-only mesh to {output_path}")
+                except Exception as e:
+                    print(f"\n✗ Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self._fallback_save(opdict, output_path)
+            else:
+                print("\n⚠ Missing data, saving geometry only")
+                self._fallback_save(opdict, output_path)
         else:
-            # No texture - just save geometry
-            if 'verts' in opdict:
-                faces = self.deca.render.faces[0].cpu().numpy()
-                util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
-                print(f"✓ Saved geometry mesh to {output_path}")
+            print("\nℹ Texture disabled, saving geometry only")
+            self._fallback_save(opdict, output_path)
 
         # Save visualizations
+        print("\nSaving visualizations...")
+
         viz_mapping = {
             'inputs': 'input_reference.png',
             'shape_images': 'merged_shape.png',
             'shape_detail_images': 'merged_detail.png',
             'rendered_images': 'merged_rendered.png',
             'landmarks2d': 'merged_landmarks.png',
-            'landmarks3d': 'merged_landmarks3d.png'
         }
         viz_saved = []
 
@@ -289,6 +386,13 @@ class MultiImageDECA:
         print(f"All results saved to: {output_dir}")
         print(f"{'=' * 60}")
 
+    def _fallback_save(self, opdict, output_path):
+        """Fallback: save geometry without texture"""
+        if 'verts' in opdict:
+            faces = self.deca.render.faces[0].cpu().numpy()
+            util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
+            print(f"✓ Saved geometry: {output_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -301,6 +405,12 @@ Examples:
 
   # Use only frontal view
   python multi_image_deca2.py -i input_folder -o results --strategy frontal
+  
+  # Multi-view texture blending (RECOMMENDED)
+  python multi_image_deca2.py -i input_folder -o results --blend-textures
+
+  # Single-view texture (faster, may have gaps)
+  python multi_image_deca2.py -i input_folder -o results --no-blend-textures
         """
     )
 
@@ -314,6 +424,11 @@ Examples:
                              '  identity: Average shape/detail, use frontal for pose (RECOMMENDED)\n'
                              '  frontal: Use only the most frontal view\n'
                              '  average: Average all parameters (may cause artifacts)')
+    parser.add_argument('--blend-textures', dest='blend_textures', action='store_true',
+                        help='Enable multi-view texture blending (default)')
+    parser.add_argument('--no-blend-textures', dest='blend_textures', action='store_false',
+                        help='Disable texture blending, use frontal view only')
+    parser.set_defaults(blend_textures=True)
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'],
                         help='Device to run on')
     parser.add_argument('--config', default='configs/deca_config.yml',
@@ -332,20 +447,24 @@ Examples:
 
     cfg.merge_from_file(args.config)
 
-    # Check texture configuration
+    # Print configuration
     print("\n" + "=" * 60)
-    print("Configuration Check")
+    print("Multi-Image DECA Configuration")
     print("=" * 60)
     if hasattr(cfg, 'model') and hasattr(cfg.model, 'use_tex'):
         if cfg.model.use_tex:
-            print("✓ Texture support: ENABLED")
+            print("✓ Texture: ENABLED")
             if hasattr(cfg.model, 'tex_type'):
                 print(f"  - Texture type: {cfg.model.tex_type}")
             if hasattr(cfg.model, 'extract_tex'):
                 print(f"  - Extract texture: {cfg.model.extract_tex}")
+            if args.blend_textures:
+                print("✓ Multi-view texture blending: ENABLED")
+            else:
+                print("ℹ Multi-view texture blending: DISABLED")
         else:
-            print("ℹ Texture support: DISABLED (geometry only)")
-            print("  To enable: set use_tex: True in config")
+            print("ℹ Texture: DISABLED")
+    print(f"Strategy: {args.strategy}")
     print("=" * 60 + "\n")
 
     # Find all images in input folder
@@ -368,11 +487,16 @@ Examples:
     print(f"Strategy: {args.strategy}")
     print(f"Output: {args.output_folder}\n")
 
-    # Run multi-image reconstruction
+    # Run reconstruction
     multi_deca = MultiImageDECA(cfg)
-    multi_deca.reconstruct_multi_image(image_paths, args.output_folder, strategy=args.strategy)
+    multi_deca.reconstruct_multi_image(
+        image_paths,
+        args.output_folder,
+        strategy=args.strategy,
+        blend_textures=args.blend_textures
+    )
 
-    print("\n✓ Multi-image reconstruction complete!")
+    print("\n✓ Reconstruction complete!")
 
 
 if __name__ == '__main__':
