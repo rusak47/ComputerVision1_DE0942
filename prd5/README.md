@@ -23,3 +23,10 @@ Programmas kods (.ipynb)
 Savi attēli (2D foto), 3D renderētu modeļu ekrānattēli.
 Secinājumi (var tikt pievienoti teksta laukā, darba iesniegšanas uzdevumi, vai kā atsēvišķš pdf fails)
 
+-------------------
+Deca multi image #TODO
+
+1) test with ideal images - frontal symmetric - both ears are visible
+2) add left and right profile images
+3) make 45 angle images
+
