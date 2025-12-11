@@ -15,6 +15,7 @@ git remote add origin https://github.com/rusak47/ComputerVision1_DE0942.git
 git push --set-upstream origin master # make git push automatically to this branch if nothing specified
 git push -u origin master
 
+--------- 1GB limit, so no use
 git lfs install
 git lfs track "*.jpg"
 git lfs track "*.jpeg"

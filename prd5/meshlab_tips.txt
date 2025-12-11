@@ -1,0 +1,12 @@
+3. Instant pretty view (do this once inside MeshLab)
+
+Press 5 → shaded view
+Press Ctrl + A → selects everything
+Click Render → Shaders → “MatCap” → “Pearl” (or “Skin” – looks amazing on faces)
+Press F → fills the window perfectly
+Mouse wheel = zoom, left-click drag = rotate
+
+Bonus: To see the texture perfectly
+
+In MeshLab: Filters → Texture → Parameterization + Texturing from Vertex Color (if texture looks broken)
+Or just use Render → Shaders → “Normal Map + Texture”
