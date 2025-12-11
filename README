@@ -1,0 +1,16 @@
+eval "$(ssh-agent -s)"
+ssh-add -l # list existing
+ssh-add ~/.ssh/some_key 
+ssh -T git@github.com # test
+---------
+gh auth login # login to access github api (prefer ssh access for git)
+gh repo create ComputerVision1_DE0942 --public
+✓ Created repository rusak47/ComputerVision1_DE0942 on github.com
+  https://github.com/rusak47/ComputerVision1_DE0942
+----------
+git init
+git add .
+git commit -m "Initial commit"
+git remote add origin https://github.com/rusak47/ComputerVision1_DE0942.git
+git push --set-upstream origin master # make git push automatically to this branch if nothing specified
+git push -u origin master
