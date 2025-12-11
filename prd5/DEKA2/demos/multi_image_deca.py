@@ -77,23 +77,32 @@ class MultiImageDECA:
             all_images.append(image_tensor)
 
         # Merge codes from all images
-        merged_code = self.merge_codes(all_codes, strategy)
-
         # CRITICAL: The merged_code['images'] must contain the frontal image
         # for proper texture extraction
-        print("\nDecoding merged parameters with texture extraction...")
+        merged_code = self.merge_codes(all_codes, strategy)
+
+        # Decode to get 3D reconstruction with full outputs for texture
+        print("\nDecoding merged parameters...")
         with torch.no_grad():
             # Decode with all necessary flags for texture
             opdict, visdict = self.deca.decode(
                 merged_code,
                 rendering=True,
                 vis_lmk=True,
-                return_vis=True,  # REQUIRED for texture extraction
+                return_vis=True,  # This generates uv_texture_gt needed for texture
                 use_detail=True
             )
 
+        # Debug: Print what's in opdict
+        print("\nAvailable data in opdict:")
+        for key in opdict.keys():
+            if isinstance(opdict[key], torch.Tensor):
+                print(f"  - {key}: {opdict[key].shape}")
+            else:
+                print(f"  - {key}: {type(opdict[key])}")
+
         # Save results
-        self.save_results(opdict, visdict, output_dir, all_images, merged_code)
+        self.save_results(opdict, visdict, output_dir, all_images)
 
         # Also save individual reconstructions for comparison
         self.save_individual_results(all_codes, output_dir)
@@ -118,7 +127,7 @@ class MultiImageDECA:
         if strategy == 'identity':
             print("\nUsing 'identity' merging strategy:")
             print("- Averaging shape and detail across all views")
-            print("- Using frontal view for pose, expression, and texture extraction")
+            print("- Using frontal view for pose, expression, and lighting")
 
             # Start with frontal view (includes frontal image for texture extraction)
             merged = {key: frontal_code[key].clone() for key in frontal_code.keys()}
@@ -135,16 +144,16 @@ class MultiImageDECA:
                 merged['detail'] = details.mean(dim=0)
                 print(f"  - Averaged detail from {len(all_codes)} views")
 
-            # Average texture parameters across all views
+            # Average texture parameters across all views for better texture quality
             if 'tex' in merged:
                 textures = torch.stack([code['tex'] for code in all_codes])
                 merged['tex'] = textures.mean(dim=0)
-                print(f"  - Averaged texture parameters from {len(all_codes)} views")
+                print(f"  - Averaged texture from {len(all_codes)} views")
 
-            # CRITICAL: Keep frontal image for texture extraction
-            # The decode() method extracts texture from merged['images']
-            merged['images'] = frontal_code['images']
-            print(f"  - Using image {frontal_idx + 1} for texture extraction")
+            # Keep pose, expression, camera, light from frontal view
+            for key in ['pose', 'exp', 'cam', 'light']:
+                if key in frontal_code:
+                    merged[key] = frontal_code[key]
 
         elif strategy == 'frontal':
             print("\nUsing 'frontal' merging strategy:")
@@ -163,7 +172,7 @@ class MultiImageDECA:
                 stacked = torch.stack([code[key] for code in all_codes])
                 merged[key] = stacked.mean(dim=0)
 
-        # Always use frontal image for rendering
+        # Always use frontal image for rendering and texture extraction
         merged['images'] = frontal_code['images']
 
         return merged
@@ -177,93 +186,81 @@ class MultiImageDECA:
 
         for idx, codedict in enumerate(all_codes):
             with torch.no_grad():
-                opdict, visdict = self.deca.decode(
-                    codedict,
-                    rendering=True,
-                    vis_lmk=True,
-                    return_vis=True,  # Enable texture extraction
-                    use_detail=True
-                )
+                opdict, visdict = self.deca.decode(codedict)
 
-            # Save with DECA's save_obj method
-            if self.config.model.use_tex:
-                try:
-                    obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
-                    self.deca.save_obj(obj_path, opdict)
-                    print(f"  ✓ View {idx + 1}: textured mesh saved")
-                except Exception as e:
-                    print(f"  ⚠ View {idx + 1}: texture save failed - {e}")
-                    if 'verts' in opdict:
-                        faces = self.deca.render.faces[0].cpu().numpy()
-                        obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
-                        util.write_obj(obj_path, opdict['verts'][0].cpu().numpy(), faces)
-            else:
-                if 'verts' in opdict:
-                    faces = self.deca.render.faces[0].cpu().numpy()
-                    obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
-                    util.write_obj(obj_path, opdict['verts'][0].cpu().numpy(), faces)
+            # Save mesh
+            if 'verts' in opdict:
+                faces = self.deca.render.faces[0].cpu().numpy()
+                obj_path = os.path.join(individual_dir, f'view_{idx + 1}.obj')
+                util.write_obj(
+                    obj_path,
+                    opdict['verts'][0].cpu().numpy(),
+                    faces
+                )
 
             # Save visualization
-            if 'shape_detail_images' in visdict:
-                detail_img = visdict['shape_detail_images'][0].detach().cpu()
-                detail_img = detail_img.permute(1, 2, 0).numpy()
-                detail_img = np.clip(detail_img * 255, 0, 255).astype(np.uint8)
+            if 'shape_images' in visdict:
+                shape_img = visdict['shape_images'][0].detach().cpu()
+                shape_img = shape_img.permute(1, 2, 0).numpy()
+                shape_img = np.clip(shape_img * 255, 0, 255).astype(np.uint8)
                 cv2.imwrite(
-                    os.path.join(individual_dir, f'view_{idx + 1}_detail.png'),
-                    cv2.cvtColor(detail_img, cv2.COLOR_RGB2BGR)
+                    os.path.join(individual_dir, f'view_{idx + 1}_shape.png'),
+                    cv2.cvtColor(shape_img, cv2.COLOR_RGB2BGR)
                 )
 
-    def save_results(self, opdict, visdict, output_dir, images, merged_code):
-        """Save reconstruction results with texture"""
+    def save_results(self, opdict, visdict, output_dir, images):
+        """Save reconstruction results"""
 
-        print("\n" + "=" * 60)
-        print("Saving merged reconstruction results...")
-        print("=" * 60)
+        print("\nSaving merged reconstruction results...")
 
+        # Save mesh using DECA's method if texture is enabled
         output_path = os.path.join(output_dir, 'merged_mesh.obj')
 
         if self.config.model.use_tex:
-            # Check what data is available
-            print("\nChecking opdict contents:")
-            has_texture_data = 'uv_texture_gt' in opdict
-            has_detail_data = 'uv_detail_normals' in opdict and 'displacement_map' in opdict
-            has_normals = 'normals' in opdict
+            try:
+                # Check if we have the required texture data
+                required_keys = ['verts', 'uv_texture_gt', 'uv_detail_normals', 'displacement_map', 'normals']
+                missing_keys = [key for key in required_keys if key not in opdict]
 
-            print(f"  - uv_texture_gt: {'✓' if has_texture_data else '✗'}")
-            print(f"  - uv_detail_normals: {'✓' if 'uv_detail_normals' in opdict else '✗'}")
-            print(f"  - displacement_map: {'✓' if 'displacement_map' in opdict else '✗'}")
-            print(f"  - normals: {'✓' if has_normals else '✗'}")
-            print(f"  - verts: {'✓' if 'verts' in opdict else '✗'}")
-
-            if has_texture_data and has_detail_data and has_normals:
-                try:
-                    print("\n✓ All required data present, using DECA's save_obj...")
+                if missing_keys:
+                    print(f"⚠ Missing texture data: {missing_keys}")
+                    print("  Saving geometry-only mesh...")
+                    if 'verts' in opdict:
+                        faces = self.deca.render.faces[0].cpu().numpy()
+                        util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
+                        print(f"✓ Saved geometry-only mesh to {output_path}")
+                else:
+                    print("✓ All texture data present, saving with DECA's save_obj method...")
                     self.deca.save_obj(output_path, opdict)
-                    print(f"✓ Saved textured mesh: {output_path}")
-                    print(f"✓ Saved detailed mesh: {output_path.replace('.obj', '_detail.obj')}")
+                    print(f"✓ Saved textured mesh to {output_path}")
+                    print(f"✓ Saved detailed mesh to {output_path.replace('.obj', '_detail.obj')}")
 
-                    # Also save texture as separate PNG
-                    texture = util.tensor2image(opdict['uv_texture_gt'][0])
-                    texture_path = os.path.join(output_dir, 'merged_texture.png')
-                    cv2.imwrite(texture_path, cv2.cvtColor(texture, cv2.COLOR_RGB2BGR))
-                    print(f"✓ Saved texture map: {texture_path}")
+                    # Also save the texture as a separate image file
+                    if 'uv_texture_gt' in opdict:
+                        texture = util.tensor2image(opdict['uv_texture_gt'][0])
+                        cv2.imwrite(
+                            os.path.join(output_dir, 'texture_map.png'),
+                            cv2.cvtColor(texture, cv2.COLOR_RGB2BGR)
+                        )
+                        print(f"✓ Saved texture map to texture_map.png")
 
-                except Exception as e:
-                    print(f"\n✗ Error using DECA save_obj: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self._fallback_save(opdict, output_path)
-            else:
-                print("\n⚠ Missing texture data, saving geometry only")
-                self._fallback_save(opdict, output_path)
+            except Exception as e:
+                print(f"⚠ Error saving textured obj: {e}")
+                import traceback
+                traceback.print_exc()
+                print("  Falling back to geometry-only save...")
+                if 'verts' in opdict:
+                    faces = self.deca.render.faces[0].cpu().numpy()
+                    util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
+                    print(f"✓ Saved geometry-only mesh to {output_path}")
         else:
-            print("\nℹ Texture disabled in config, saving geometry only")
-            self._fallback_save(opdict, output_path)
+            # No texture - just save geometry
+            if 'verts' in opdict:
+                faces = self.deca.render.faces[0].cpu().numpy()
+                util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
+                print(f"✓ Saved geometry mesh to {output_path}")
 
-        # Save all visualizations
-        print("\nSaving visualizations...")
-        viz_count = 0
-
+        # Save visualizations
         viz_mapping = {
             'inputs': 'input_reference.png',
             'shape_images': 'merged_shape.png',
@@ -272,6 +269,7 @@ class MultiImageDECA:
             'landmarks2d': 'merged_landmarks.png',
             'landmarks3d': 'merged_landmarks3d.png'
         }
+        viz_saved = []
 
         for key, filename in viz_mapping.items():
             if key in visdict:
@@ -282,20 +280,14 @@ class MultiImageDECA:
                     os.path.join(output_dir, filename),
                     cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 )
-                viz_count += 1
+            viz_saved.append(key)
 
-        print(f"✓ Saved {viz_count} visualization images")
+        if viz_saved:
+            print(f"✓ Saved visualizations: {', '.join(viz_saved)}")
 
-        print("\n" + "=" * 60)
+        print(f"\n{'=' * 60}")
         print(f"All results saved to: {output_dir}")
-        print("=" * 60)
-
-    def _fallback_save(self, opdict, output_path):
-        """Fallback method to save geometry without texture"""
-        if 'verts' in opdict:
-            faces = self.deca.render.faces[0].cpu().numpy()
-            util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
-            print(f"✓ Saved geometry mesh: {output_path}")
+        print(f"{'=' * 60}")
 
 
 def main():
@@ -369,6 +361,9 @@ Examples:
         print(f"✗ No images found in {args.input_folder}")
         return
 
+    print(f"\n{'=' * 60}")
+    print(f"Multi-Image DECA Reconstruction")
+    print(f"{'=' * 60}")
     print(f"Found {len(image_paths)} images")
     print(f"Strategy: {args.strategy}")
     print(f"Output: {args.output_folder}\n")
