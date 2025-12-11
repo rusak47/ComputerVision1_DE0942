@@ -1,0 +1,93 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+
+<rdf:Description rdf:about='/home/lxc_media/lxc-messangers/#COLT/#RTU/Computer Vision(1) (DE0942)/prd23/mine/01right.jpg'
+  xmlns:et='http://ns.exiftool.org/1.0/' et:toolkit='Image::ExifTool 13.30'
+  xmlns:ExifTool='http://ns.exiftool.org/ExifTool/1.0/'
+  xmlns:System='http://ns.exiftool.org/File/System/1.0/'
+  xmlns:File='http://ns.exiftool.org/File/1.0/'
+  xmlns:IFD0='http://ns.exiftool.org/EXIF/IFD0/1.0/'
+  xmlns:ExifIFD='http://ns.exiftool.org/EXIF/ExifIFD/1.0/'
+  xmlns:InteropIFD='http://ns.exiftool.org/EXIF/InteropIFD/1.0/'
+  xmlns:IFD1='http://ns.exiftool.org/EXIF/IFD1/1.0/'
+  xmlns:Composite='http://ns.exiftool.org/Composite/1.0/'>
+ <ExifTool:ExifToolVersion>13.30</ExifTool:ExifToolVersion>
+ <System:FileName>01right.jpg</System:FileName>
+ <System:Directory>/home/lxc_media/lxc-messangers/#COLT/#RTU/Computer Vision(1) (DE0942)/prd23/mine</System:Directory>
+ <System:FileSize>2.6 MB</System:FileSize>
+ <System:FileModifyDate>2025:10:22 21:49:39+03:00</System:FileModifyDate>
+ <System:FileAccessDate>2025:10:22 21:53:38+03:00</System:FileAccessDate>
+ <System:FileInodeChangeDate>2025:11:01 21:57:33+02:00</System:FileInodeChangeDate>
+ <System:FilePermissions>-rw-rw-r--</System:FilePermissions>
+ <File:FileType>JPEG</File:FileType>
+ <File:FileTypeExtension>jpg</File:FileTypeExtension>
+ <File:MIMEType>image/jpeg</File:MIMEType>
+ <File:ExifByteOrder>Little-endian (Intel, II)</File:ExifByteOrder>
+ <IFD0:ImageDescription></IFD0:ImageDescription>
+ <IFD0:Make>runyee</IFD0:Make>
+ <IFD0:Model>MAXo</IFD0:Model>
+ <IFD0:Orientation>Horizontal (normal)</IFD0:Orientation>
+ <IFD0:XResolution>72</IFD0:XResolution>
+ <IFD0:YResolution>72</IFD0:YResolution>
+ <IFD0:ResolutionUnit>inches</IFD0:ResolutionUnit>
+ <IFD0:Software>MediaTek Camera Application</IFD0:Software>
+ <IFD0:ModifyDate>2025:10:22 21:49:39</IFD0:ModifyDate>
+ <IFD0:YCbCrPositioning>Co-sited</IFD0:YCbCrPositioning>
+ <ExifIFD:ExposureTime>1/20</ExifIFD:ExposureTime>
+ <ExifIFD:FNumber>2.8</ExifIFD:FNumber>
+ <ExifIFD:ExposureProgram>Not Defined</ExifIFD:ExposureProgram>
+ <ExifIFD:ISO>206</ExifIFD:ISO>
+ <ExifIFD:SensitivityType>Unknown</ExifIFD:SensitivityType>
+ <ExifIFD:RecommendedExposureIndex>0</ExifIFD:RecommendedExposureIndex>
+ <ExifIFD:ExifVersion>0220</ExifIFD:ExifVersion>
+ <ExifIFD:DateTimeOriginal>2025:10:22 21:49:39</ExifIFD:DateTimeOriginal>
+ <ExifIFD:CreateDate>2025:10:22 21:49:39</ExifIFD:CreateDate>
+ <ExifIFD:ComponentsConfiguration>Y, Cb, Cr, -</ExifIFD:ComponentsConfiguration>
+ <ExifIFD:ShutterSpeedValue>1/19</ExifIFD:ShutterSpeedValue>
+ <ExifIFD:BrightnessValue>0</ExifIFD:BrightnessValue>
+ <ExifIFD:ExposureCompensation>0</ExifIFD:ExposureCompensation>
+ <ExifIFD:MaxApertureValue>2.0</ExifIFD:MaxApertureValue>
+ <ExifIFD:MeteringMode>Center-weighted average</ExifIFD:MeteringMode>
+ <ExifIFD:LightSource>Other</ExifIFD:LightSource>
+ <ExifIFD:Flash>On, Fired</ExifIFD:Flash>
+ <ExifIFD:FocalLength>2.9 mm</ExifIFD:FocalLength>
+ <ExifIFD:SubSecTime>668</ExifIFD:SubSecTime>
+ <ExifIFD:SubSecTimeOriginal>668</ExifIFD:SubSecTimeOriginal>
+ <ExifIFD:SubSecTimeDigitized>668</ExifIFD:SubSecTimeDigitized>
+ <ExifIFD:FlashpixVersion>0100</ExifIFD:FlashpixVersion>
+ <ExifIFD:ColorSpace>sRGB</ExifIFD:ColorSpace>
+ <ExifIFD:ExifImageWidth>3264</ExifIFD:ExifImageWidth>
+ <ExifIFD:ExifImageHeight>2448</ExifIFD:ExifImageHeight>
+ <InteropIFD:InteropIndex>R98 - DCF basic file (sRGB)</InteropIFD:InteropIndex>
+ <InteropIFD:InteropVersion>0100</InteropIFD:InteropVersion>
+ <ExifIFD:ExposureMode>Auto</ExifIFD:ExposureMode>
+ <ExifIFD:WhiteBalance>Auto</ExifIFD:WhiteBalance>
+ <ExifIFD:DigitalZoomRatio>1</ExifIFD:DigitalZoomRatio>
+ <ExifIFD:FocalLengthIn35mmFormat>0 mm</ExifIFD:FocalLengthIn35mmFormat>
+ <ExifIFD:SceneCaptureType>Standard</ExifIFD:SceneCaptureType>
+ <IFD1:Compression>JPEG (old-style)</IFD1:Compression>
+ <IFD1:Orientation>Horizontal (normal)</IFD1:Orientation>
+ <IFD1:XResolution>72</IFD1:XResolution>
+ <IFD1:YResolution>72</IFD1:YResolution>
+ <IFD1:ResolutionUnit>inches</IFD1:ResolutionUnit>
+ <IFD1:ThumbnailOffset>1408</IFD1:ThumbnailOffset>
+ <IFD1:ThumbnailLength>49792</IFD1:ThumbnailLength>
+ <IFD1:YCbCrPositioning>Co-sited</IFD1:YCbCrPositioning>
+ <File:ImageWidth>3264</File:ImageWidth>
+ <File:ImageHeight>2448</File:ImageHeight>
+ <File:EncodingProcess>Baseline DCT, Huffman coding</File:EncodingProcess>
+ <File:BitsPerSample>8</File:BitsPerSample>
+ <File:ColorComponents>3</File:ColorComponents>
+ <File:YCbCrSubSampling>YCbCr4:2:0 (2 2)</File:YCbCrSubSampling>
+ <Composite:Aperture>2.8</Composite:Aperture>
+ <Composite:ImageSize>3264x2448</Composite:ImageSize>
+ <Composite:Megapixels>8.0</Composite:Megapixels>
+ <Composite:ShutterSpeed>1/20</Composite:ShutterSpeed>
+ <Composite:SubSecCreateDate>2025:10:22 21:49:39.668</Composite:SubSecCreateDate>
+ <Composite:SubSecDateTimeOriginal>2025:10:22 21:49:39.668</Composite:SubSecDateTimeOriginal>
+ <Composite:SubSecModifyDate>2025:10:22 21:49:39.668</Composite:SubSecModifyDate>
+ <IFD1:ThumbnailImage>(Binary data 49792 bytes, use -b option to extract)</IFD1:ThumbnailImage>
+ <Composite:FocalLength35efl>2.9 mm</Composite:FocalLength35efl>
+ <Composite:LightValue>6.3</Composite:LightValue>
+</rdf:Description>
+</rdf:RDF>
