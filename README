@@ -14,3 +14,15 @@ git commit -m "Initial commit"
 git remote add origin https://github.com/rusak47/ComputerVision1_DE0942.git
 git push --set-upstream origin master # make git push automatically to this branch if nothing specified
 git push -u origin master
+
+git lfs install
+git lfs track "*.jpg"
+git lfs track "*.jpeg"
+git lfs track "*.png"
+git lfs track "*.7z"
+git lfs track "*.zip"
+git lfs track "*.ipynb"
+git add .gitattributes
+git commit -m "Track big files with Git LFS"
+git lfs migrate import --include="*.zip,*.7z,*.jpg,*.png,*.ipynb"
+git push origin --force
