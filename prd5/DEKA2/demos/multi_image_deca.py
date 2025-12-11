@@ -82,21 +82,67 @@ class MultiImageDECA:
         return merged
 
     def save_results(self, opdict, visdict, output_dir, images):
+        """Save reconstruction results to disk"""
+
+        # Get faces from the renderer, not from FLAME
+        faces = self.deca.render.faces[0].cpu().numpy()
+
+        # Save 3D mesh
         if 'verts' in opdict:
             util.write_obj(
                 os.path.join(output_dir, 'multi_image_mesh.obj'),
                 opdict['verts'][0].cpu().numpy(),
-                self.deca.flame.faces
+                faces
             )
+            print(f"Saved mesh to {os.path.join(output_dir, 'multi_image_mesh.obj')}")
 
+        # Save shape visualization
         if 'shape_images' in visdict:
-            util.save_image(visdict['shape_images'][0], os.path.join(output_dir, 'shape.png'))
+            shape_img = visdict['shape_images'][0].detach().cpu()
+            # Convert from tensor [C, H, W] to numpy [H, W, C] and scale to 0-255
+            shape_img = shape_img.permute(1, 2, 0).numpy()
+            shape_img = np.clip(shape_img * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(output_dir, 'shape.png'),
+                        cv2.cvtColor(shape_img, cv2.COLOR_RGB2BGR))
+            print(f"Saved shape image to {os.path.join(output_dir, 'shape.png')}")
 
-        if 'detail_images' in visdict:
-            util.save_image(visdict['detail_images'][0], os.path.join(output_dir, 'detail.png'))
+        # Save detail visualization if available
+        if 'shape_detail_images' in visdict:
+            detail_img = visdict['shape_detail_images'][0].detach().cpu()
+            detail_img = detail_img.permute(1, 2, 0).numpy()
+            detail_img = np.clip(detail_img * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(output_dir, 'detail.png'),
+                        cv2.cvtColor(detail_img, cv2.COLOR_RGB2BGR))
+            print(f"Saved detail image to {os.path.join(output_dir, 'detail.png')}")
 
-        print(f"Results saved to {output_dir}")
+        # Save rendered image if available
+        if 'rendered_images' in visdict:
+            rendered_img = visdict['rendered_images'][0].detach().cpu()
+            rendered_img = rendered_img.permute(1, 2, 0).numpy()
+            rendered_img = np.clip(rendered_img * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(output_dir, 'rendered.png'),
+                        cv2.cvtColor(rendered_img, cv2.COLOR_RGB2BGR))
+            print(f"Saved rendered image to {os.path.join(output_dir, 'rendered.png')}")
 
+        # Save input images visualization
+        if 'inputs' in visdict:
+            input_img = visdict['inputs'][0].detach().cpu()
+            input_img = input_img.permute(1, 2, 0).numpy()
+            input_img = np.clip(input_img * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(output_dir, 'input.png'),
+                        cv2.cvtColor(input_img, cv2.COLOR_RGB2BGR))
+            print(f"Saved input image to {os.path.join(output_dir, 'input.png')}")
+
+        # Save landmarks visualization
+        if 'landmarks2d' in visdict:
+            lmk_img = visdict['landmarks2d'][0].detach().cpu()
+            lmk_img = lmk_img.permute(1, 2, 0).numpy()
+            lmk_img = np.clip(lmk_img * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(output_dir, 'landmarks.png'),
+                        cv2.cvtColor(lmk_img, cv2.COLOR_RGB2BGR))
+            print(f"Saved landmarks image to {os.path.join(output_dir, 'landmarks.png')}")
+
+        print(f"\nAll results saved to {output_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-Image DECA Reconstruction')
