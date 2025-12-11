@@ -59,10 +59,10 @@ class MultiImageDECA:
         print(f"\nSelected image {best_idx + 1} as most frontal view")
         return best_idx
 
-    def blend_multi_view_textures(self, all_opdicts, merged_verts):
+    def blend_multi_view_textures(self, all_opdicts, all_codes, frontal_idx, mirror_missing=True):
         """
-        Blend textures from multiple views to eliminate gaps.
-        Uses visibility weighting based on surface normals.
+        Blend textures from multiple views with intelligent view-based weighting.
+        Frontal areas use frontal view, profile areas use profile views.
         """
         print("\n" + "=" * 60)
         print("Blending textures from multiple views...")
@@ -76,59 +76,142 @@ class MultiImageDECA:
         blended_texture = torch.zeros((1, 3, uv_size, uv_size), device=device)
         weight_sum = torch.zeros((1, 1, uv_size, uv_size), device=device)
 
-        for idx, opdict in enumerate(all_opdicts):
+        for idx, (opdict, code) in enumerate(zip(all_opdicts, all_codes)):
             if 'uv_texture_gt' not in opdict:
                 print(f"  ⚠ View {idx + 1}: No texture data, skipping")
                 continue
 
-            # Get texture and normals for this view
             texture = opdict['uv_texture_gt']  # [1, 3, H, W]
 
-            # Calculate visibility weight based on viewing angle
-            # Normals pointing toward camera (z > 0) get higher weight
+            # Calculate view angle from pose parameters
+            pose = code['pose'][0]
+            rotation = torch.norm(pose[:3]).item()
+
+            # Determine if this is frontal or profile view
+            is_frontal = (idx == frontal_idx)
+
+            # Content mask: where actual texture exists
+            texture_brightness = texture.mean(dim=1, keepdim=True)
+            content_mask = (texture_brightness > 0.05).float()
+
+            # View-specific weighting based on surface normals
             if 'normals' in opdict:
-                normals = opdict['normals']  # [1, V, 3]
+                try:
+                    normals = opdict['normals']
+                    uv_normals = self.deca.render.world2uv(normals)
+                    normal_z = uv_normals[:, 2:3, :, :]
 
-                # Project normals to UV space
-                uv_normals = self.deca.render.world2uv(normals)  # [1, 3, H, W]
+                    if is_frontal:
+                        # Frontal view: Strongly favor surfaces facing forward
+                        # Give very high weight to frontal areas (z > 0)
+                        view_weight = torch.sigmoid(normal_z * 8.0)  # Sharp transition
+                        view_weight = 0.5 + 0.5 * view_weight  # Min weight 0.5
+                        print(f"  - View {idx + 1} (FRONTAL): high weight for forward-facing surfaces")
+                    else:
+                        # Profile view: Favor side-facing surfaces
+                        # Get X component for left/right orientation
+                        normal_x = uv_normals[:, 0:1, :, :]
 
-                # Z component indicates how much surface faces camera
-                # Higher z = more frontal = higher weight
-                normal_z = uv_normals[:, 2:3, :, :]  # [1, 1, H, W]
+                        # Determine if this is left or right profile
+                        if rotation > 0.5:  # Significant rotation = profile
+                            # Use X normal to determine left/right facing
+                            side_facing = torch.abs(normal_x)
+                            view_weight = torch.sigmoid(side_facing * 4.0)
+                            # Lower weight for profile views in frontal areas
+                            frontal_penalty = torch.sigmoid(-normal_z * 4.0)
+                            view_weight = view_weight * (0.3 + 0.7 * frontal_penalty)
+                            print(f"  - View {idx + 1} (PROFILE): high weight for side-facing surfaces")
+                        else:
+                            view_weight = torch.ones_like(normal_z) * 0.3
 
-                # Soft threshold: surfaces facing camera get weight, others get 0
-                # Use sigmoid for smooth transition
-                weight = torch.sigmoid(normal_z * 5.0)  # Scale factor controls sharpness
+                except Exception as e:
+                    print(f"  ⚠ View {idx + 1}: Error calculating normals, using default weight - {e}")
+                    view_weight = torch.ones_like(content_mask) * (1.0 if is_frontal else 0.5)
             else:
-                # Fallback: equal weights
-                weight = torch.ones((1, 1, uv_size, uv_size), device=device)
+                view_weight = torch.ones_like(content_mask) * (1.0 if is_frontal else 0.5)
 
-            # Mask out black/background pixels (they shouldn't contribute)
-            texture_mask = (texture.sum(dim=1, keepdim=True) > 0.1).float()
-            weight = weight * texture_mask
+            # Final weight: content * view-specific weight
+            weight = content_mask * view_weight
 
-            # Accumulate weighted texture
+            # Boost frontal view weight to ensure it dominates in frontal areas
+            if is_frontal:
+                weight = weight * 2.0  # Double the weight for frontal view
+
+            # Accumulate
             blended_texture += texture * weight
             weight_sum += weight
 
-            # Debug info
-            coverage = (weight > 0.1).float().mean().item() * 100
-            print(f"  ✓ View {idx + 1}: {coverage:.1f}% UV coverage")
+            coverage = (weight > 0.05).float().mean().item() * 100
+            avg_weight = weight[weight > 0].mean().item() if (weight > 0).any() else 0
+            print(f"  ✓ View {idx + 1}: {coverage:.1f}% coverage, avg weight: {avg_weight:.3f}")
 
         # Normalize by total weights
         weight_sum = torch.clamp(weight_sum, min=1e-6)  # Avoid division by zero
         blended_texture = blended_texture / weight_sum
 
-        # Fill any remaining holes with mean texture
-        if hasattr(self.deca, 'mean_texture'):
-            holes_mask = (weight_sum < 0.1).float()
-            blended_texture = blended_texture * (1 - holes_mask) + self.deca.mean_texture * holes_mask
+        total_coverage = (weight_sum > 0.05).float().mean().item() * 100
 
-        total_coverage = (weight_sum > 0.1).float().mean().item() * 100
-        print(f"\n✓ Total texture coverage: {total_coverage:.1f}%")
+        # Apply mirroring if coverage is insufficient
+        if mirror_missing and total_coverage < 85.0:
+            print(f"\n  ℹ Coverage {total_coverage:.1f}% < 85%, applying texture mirroring...")
+            blended_texture, weight_sum = self._mirror_texture_to_fill_gaps(
+                blended_texture, weight_sum
+            )
+            final_coverage = (weight_sum > 0.05).float().mean().item() * 100
+            print(f"  ✓ After mirroring: {final_coverage:.1f}% coverage")
+        else:
+            final_coverage = total_coverage
+
+        # Fill remaining holes with mean texture
+        if hasattr(self.deca, 'mean_texture'):
+            holes_mask = (weight_sum < 0.05).float()
+            holes_count = holes_mask.sum().item()
+            if holes_count > 0:
+                blended_texture = blended_texture * (1 - holes_mask) + self.deca.mean_texture * holes_mask
+                print(f"  ✓ Filled {holes_count:.0f} remaining holes with mean texture")
+
+        print(f"\n✓ Final texture coverage: {final_coverage:.1f}%")
         print("=" * 60)
 
         return blended_texture
+
+    def _mirror_texture_to_fill_gaps(self, texture, weight_sum):
+        """
+        Mirror texture horizontally to fill missing opposite side.
+        Uses a more aggressive approach for low-coverage scenarios.
+        """
+        # Flip texture horizontally
+        mirrored_texture = torch.flip(texture, dims=[3])
+        mirrored_weights = torch.flip(weight_sum, dims=[3])
+
+        # Create masks for different regions
+        has_original = (weight_sum > 0.05).float()
+        has_mirrored = (mirrored_weights > 0.05).float()
+
+        # Strategy: Use original where available, mirrored where original is missing
+        # but mirrored has content
+        use_mirrored = (1 - has_original) * has_mirrored
+
+        # Blend textures
+        filled_texture = (
+                texture * has_original +  # Keep original where it exists
+                mirrored_texture * use_mirrored  # Add mirrored where original is missing
+        )
+
+        # Update weights
+        filled_weights = weight_sum + mirrored_weights * use_mirrored
+
+        # Normalize in blended regions
+        blend_mask = (has_original * has_mirrored).clamp(0, 1)
+        if blend_mask.sum() > 0:
+            # In overlap regions, blend 50/50
+            filled_texture = torch.where(
+                blend_mask > 0.5,
+                (texture + mirrored_texture) / 2,
+                filled_texture
+            )
+
+        return filled_texture, filled_weights
 
     def reconstruct_multi_image(self, image_paths, output_dir, strategy='identity', blend_textures=True):
         """Reconstruct 3D face from multiple images"""
@@ -179,10 +262,16 @@ class MultiImageDECA:
             )
 
         # Blend textures from all views if enabled
+        frontal_idx = self.select_best_frontal_view(all_codes)
         if blend_textures and self.config.model.use_tex and len(all_opdicts) > 1:
-            blended_texture = self.blend_multi_view_textures(all_opdicts, opdict['verts'])
+            blended_texture = self.blend_multi_view_textures(
+                all_opdicts,
+                all_codes,
+                frontal_idx,
+                mirror_missing=True
+            )
             opdict['uv_texture_gt'] = blended_texture
-            print("✓ Applied multi-view texture blending")
+            print("✓ Applied view-aware multi-view texture blending")
         else:
             print("ℹ Using single-view texture (frontal)")
 
@@ -220,7 +309,7 @@ class MultiImageDECA:
         if strategy == 'identity':
             print("\nUsing 'identity' merging strategy:")
             print("- Averaging shape and detail across all views")
-            print("- Using frontal view for pose, expression, and lighting")
+            print("- Using frontal view for pose, expression")
 
             # Start with frontal view (includes frontal image for texture extraction)
             merged = {key: frontal_code[key].clone() for key in frontal_code.keys()}
@@ -428,7 +517,9 @@ Examples:
                         help='Enable multi-view texture blending (default)')
     parser.add_argument('--no-blend-textures', dest='blend_textures', action='store_false',
                         help='Disable texture blending, use frontal view only')
-    parser.set_defaults(blend_textures=True)
+    parser.add_argument('--no-mirror', dest='mirror_textures', action='store_false',
+                        help='Disable texture mirroring for missing opposite side')
+    parser.set_defaults(blend_textures=True, mirror_textures=True)
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'],
                         help='Device to run on')
     parser.add_argument('--config', default='configs/deca_config.yml',
