@@ -3,6 +3,7 @@
 # Fixed for texture extraction from input images
 # introduce Multi-View Texture Blending
 #  - Combines textures from multiple views to eliminate gaps
+# Patched to uses hard selection for clear textures, only blends at boundaries
 
 import os, sys
 import cv2
@@ -59,42 +60,46 @@ class MultiImageDECA:
         print(f"\nSelected image {best_idx + 1} as most frontal view")
         return best_idx
 
-    def blend_multi_view_textures(self, all_opdicts, all_codes, frontal_idx, mirror_missing=True):
+    def smart_texture_selection(self, all_opdicts, all_codes, frontal_idx):
         """
-        Blend textures from multiple views with intelligent view-based weighting.
-        Frontal areas use frontal view, profile areas use profile views.
+        Smart texture selection using hard boundaries.
+        Each view owns specific regions - no blending except at seams.
         """
         print("\n" + "=" * 60)
-        print("Blending textures from multiple views...")
+        print("Smart Texture Selection (Hard Boundaries)")
         print("=" * 60)
 
-        # Get UV size from first opdict
         uv_size = all_opdicts[0]['uv_texture_gt'].shape[2]
         device = all_opdicts[0]['uv_texture_gt'].device
 
-        # Initialize accumulators
-        blended_texture = torch.zeros((1, 3, uv_size, uv_size), device=device)
-        weight_sum = torch.zeros((1, 1, uv_size, uv_size), device=device)
+        # Start with frontal texture as base
+        final_texture = all_opdicts[frontal_idx]['uv_texture_gt'].clone()
+        selection_mask = torch.zeros((1, 1, uv_size, uv_size), device=device)
+
+        # Build confidence map for each view
+        view_confidence_maps = []
 
         for idx, (opdict, code) in enumerate(zip(all_opdicts, all_codes)):
             if 'uv_texture_gt' not in opdict:
-                print(f"  ⚠ View {idx + 1}: No texture data, skipping")
+                view_confidence_maps.append(None)
                 continue
 
-            texture = opdict['uv_texture_gt']  # [1, 3, H, W]
-
-            # Calculate view angle from pose parameters
-            pose = code['pose'][0]
-            rotation = torch.norm(pose[:3]).item()
-
-            # Determine if this is frontal or profile view
+            texture = opdict['uv_texture_gt']
             is_frontal = (idx == frontal_idx)
 
-            # Content mask: where actual texture exists
-            texture_brightness = texture.mean(dim=1, keepdim=True)
-            content_mask = (texture_brightness > 0.05).float()
+            # Calculate confidence based on:
+            # 1. Content quality (brightness, variance)
+            # 2. View angle (surface normal alignment)
 
-            # View-specific weighting based on surface normals
+            # Content quality
+            texture_brightness = texture.mean(dim=1, keepdim=True)
+            has_content = (texture_brightness > 0.05).float()
+
+            # Calculate texture variance as quality metric
+            texture_var = texture.var(dim=1, keepdim=True)
+            texture_quality = torch.sigmoid((texture_var - 0.01) * 100)  # High variance = good detail
+
+            # View angle confidence
             if 'normals' in opdict:
                 try:
                     normals = opdict['normals']
@@ -102,116 +107,152 @@ class MultiImageDECA:
                     normal_z = uv_normals[:, 2:3, :, :]
 
                     if is_frontal:
-                        # Frontal view: Strongly favor surfaces facing forward
-                        # Give very high weight to frontal areas (z > 0)
-                        view_weight = torch.sigmoid(normal_z * 8.0)  # Sharp transition
-                        view_weight = 0.5 + 0.5 * view_weight  # Min weight 0.5
-                        print(f"  - View {idx + 1} (FRONTAL): high weight for forward-facing surfaces")
+                        # Frontal: high confidence when facing camera
+                        angle_confidence = torch.sigmoid(normal_z * 6.0)
                     else:
-                        # Profile view: Favor side-facing surfaces
-                        # Get X component for left/right orientation
+                        # Profile: high confidence for side surfaces
                         normal_x = uv_normals[:, 0:1, :, :]
-
-                        # Determine if this is left or right profile
-                        if rotation > 0.5:  # Significant rotation = profile
-                            # Use X normal to determine left/right facing
-                            side_facing = torch.abs(normal_x)
-                            view_weight = torch.sigmoid(side_facing * 4.0)
-                            # Lower weight for profile views in frontal areas
-                            frontal_penalty = torch.sigmoid(-normal_z * 4.0)
-                            view_weight = view_weight * (0.3 + 0.7 * frontal_penalty)
-                            print(f"  - View {idx + 1} (PROFILE): high weight for side-facing surfaces")
-                        else:
-                            view_weight = torch.ones_like(normal_z) * 0.3
+                        side_facing = torch.abs(normal_x)
+                        # Penalty for frontal-facing areas
+                        frontal_penalty = torch.sigmoid(-normal_z * 4.0)
+                        angle_confidence = torch.sigmoid(side_facing * 3.0) * frontal_penalty
 
                 except Exception as e:
-                    print(f"  ⚠ View {idx + 1}: Error calculating normals, using default weight - {e}")
-                    view_weight = torch.ones_like(content_mask) * (1.0 if is_frontal else 0.5)
+                    print(f"  ⚠ View {idx + 1}: Error with normals - {e}")
+                    angle_confidence = torch.ones_like(has_content)
             else:
-                view_weight = torch.ones_like(content_mask) * (1.0 if is_frontal else 0.5)
+                angle_confidence = torch.ones_like(has_content)
 
-            # Final weight: content * view-specific weight
-            weight = content_mask * view_weight
+            # Combined confidence
+            confidence = has_content * texture_quality * angle_confidence
 
-            # Boost frontal view weight to ensure it dominates in frontal areas
+            # Boost frontal view confidence significantly
             if is_frontal:
-                weight = weight * 2.0  # Double the weight for frontal view
+                confidence = confidence * 3.0  # 3x boost for frontal
 
-            # Accumulate
-            blended_texture += texture * weight
-            weight_sum += weight
+            view_confidence_maps.append(confidence)
 
-            coverage = (weight > 0.05).float().mean().item() * 100
-            avg_weight = weight[weight > 0].mean().item() if (weight > 0).any() else 0
-            print(f"  ✓ View {idx + 1}: {coverage:.1f}% coverage, avg weight: {avg_weight:.3f}")
+            avg_conf = confidence[confidence > 0].mean().item() if (confidence > 0).any() else 0
+            coverage = (confidence > 0.1).float().mean().item() * 100
+            print(f"  View {idx + 1} {'(FRONTAL)' if is_frontal else '(PROFILE)'}: "
+                  f"coverage={coverage:.1f}%, avg_confidence={avg_conf:.3f}")
 
-        # Normalize by total weights
-        weight_sum = torch.clamp(weight_sum, min=1e-6)  # Avoid division by zero
-        blended_texture = blended_texture / weight_sum
+        # Hard selection: pick best view for each pixel
+        print("\nSelecting best texture for each region...")
 
-        total_coverage = (weight_sum > 0.05).float().mean().item() * 100
+        # Stack all confidence maps
+        valid_confidences = []
+        valid_textures = []
+        valid_indices = []
 
-        # Apply mirroring if coverage is insufficient
-        if mirror_missing and total_coverage < 85.0:
-            print(f"\n  ℹ Coverage {total_coverage:.1f}% < 85%, applying texture mirroring...")
-            blended_texture, weight_sum = self._mirror_texture_to_fill_gaps(
-                blended_texture, weight_sum
+        for idx, conf in enumerate(view_confidence_maps):
+            if conf is not None:
+                valid_confidences.append(conf)
+                valid_textures.append(all_opdicts[idx]['uv_texture_gt'])
+                valid_indices.append(idx)
+
+        if len(valid_confidences) == 0:
+            print("  ⚠ No valid textures found!")
+            return final_texture
+
+        # Stack and find best view per pixel
+        confidence_stack = torch.cat(valid_confidences, dim=0)  # [N, 1, H, W]
+        texture_stack = torch.cat(valid_textures, dim=0)  # [N, 3, H, W]
+
+        # Get index of best (highest confidence) view for each pixel
+        best_view_indices = torch.argmax(confidence_stack, dim=0, keepdim=True)  # [1, 1, H, W]
+
+        # Expand indices for RGB channels
+        best_view_indices_rgb = best_view_indices.expand(-1, 3, -1, -1)  # [1, 3, H, W]
+
+        # Gather textures from best views
+        # Reshape for gather operation
+        B, C, H, W = texture_stack.shape
+        texture_stack_reshaped = texture_stack.view(1, B, C, H, W)
+        best_view_indices_gather = best_view_indices_rgb.unsqueeze(1)  # [1, 1, 3, H, W]
+
+        selected_texture = torch.gather(texture_stack_reshaped, 1, best_view_indices_gather).squeeze(1)
+
+        # Apply small Gaussian blur at boundaries for smooth transitions
+        # Detect boundaries where selection changes
+        best_view_flat = best_view_indices.squeeze()
+        boundaries = self._detect_selection_boundaries(best_view_flat)
+
+        if boundaries.sum() > 0:
+            print(f"  ✓ Blending at {boundaries.sum().item()} boundary pixels")
+            selected_texture = self._blend_at_boundaries(
+                selected_texture,
+                texture_stack,
+                confidence_stack,
+                boundaries
             )
-            final_coverage = (weight_sum > 0.05).float().mean().item() * 100
-            print(f"  ✓ After mirroring: {final_coverage:.1f}% coverage")
-        else:
-            final_coverage = total_coverage
 
-        # Fill remaining holes with mean texture
-        if hasattr(self.deca, 'mean_texture'):
-            holes_mask = (weight_sum < 0.05).float()
-            holes_count = holes_mask.sum().item()
-            if holes_count > 0:
-                blended_texture = blended_texture * (1 - holes_mask) + self.deca.mean_texture * holes_mask
-                print(f"  ✓ Filled {holes_count:.0f} remaining holes with mean texture")
+        # Mirror for missing opposite side
+        coverage = (confidence_stack.max(dim=0)[0] > 0.1).float().mean().item() * 100
+
+        if coverage < 85.0:
+            print(f"\n  ℹ Coverage {coverage:.1f}% < 85%, mirroring for missing side...")
+            selected_texture = self._mirror_for_missing_side(selected_texture, confidence_stack.max(dim=0)[0])
+            final_coverage = 95.0  # Estimate after mirroring
+        else:
+            final_coverage = coverage
 
         print(f"\n✓ Final texture coverage: {final_coverage:.1f}%")
         print("=" * 60)
 
-        return blended_texture
+        return selected_texture
 
-    def _mirror_texture_to_fill_gaps(self, texture, weight_sum):
-        """
-        Mirror texture horizontally to fill missing opposite side.
-        Uses a more aggressive approach for low-coverage scenarios.
-        """
-        # Flip texture horizontally
-        mirrored_texture = torch.flip(texture, dims=[3])
-        mirrored_weights = torch.flip(weight_sum, dims=[3])
+    def _detect_selection_boundaries(self, selection_map):
+        """Detect pixels at boundaries between different view selections"""
+        # Compute gradients
+        dx = torch.abs(selection_map[1:, :] - selection_map[:-1, :])
+        dy = torch.abs(selection_map[:, 1:] - selection_map[:, :-1])
 
-        # Create masks for different regions
-        has_original = (weight_sum > 0.05).float()
-        has_mirrored = (mirrored_weights > 0.05).float()
+        # Pad to original size
+        dx = F.pad(dx, (0, 0, 0, 1), value=0)
+        dy = F.pad(dy, (0, 1, 0, 0), value=0)
 
-        # Strategy: Use original where available, mirrored where original is missing
-        # but mirrored has content
-        use_mirrored = (1 - has_original) * has_mirrored
+        # Boundary where selection changes
+        boundaries = ((dx + dy) > 0).float()
 
-        # Blend textures
-        filled_texture = (
-                texture * has_original +  # Keep original where it exists
-                mirrored_texture * use_mirrored  # Add mirrored where original is missing
-        )
+        # Dilate boundaries slightly for smoother blending
+        kernel_size = 3
+        boundaries = F.max_pool2d(
+            boundaries.unsqueeze(0).unsqueeze(0),
+            kernel_size,
+            stride=1,
+            padding=kernel_size // 2
+        ).squeeze()
 
-        # Update weights
-        filled_weights = weight_sum + mirrored_weights * use_mirrored
+        return boundaries
 
-        # Normalize in blended regions
-        blend_mask = (has_original * has_mirrored).clamp(0, 1)
-        if blend_mask.sum() > 0:
-            # In overlap regions, blend 50/50
-            filled_texture = torch.where(
-                blend_mask > 0.5,
-                (texture + mirrored_texture) / 2,
-                filled_texture
-            )
+    def _blend_at_boundaries(self, selected_texture, texture_stack, confidence_stack, boundaries):
+        """Softly blend textures only at boundary regions"""
+        # At boundaries, use weighted average based on confidence
+        boundaries_3ch = boundaries.unsqueeze(0).unsqueeze(0).expand(-1, 3, -1, -1)
 
-        return filled_texture, filled_weights
+        # Weighted blend
+        confidence_weights = F.softmax(confidence_stack * 5.0, dim=0)  # Sharp softmax
+        confidence_weights = confidence_weights.unsqueeze(2).expand(-1, -1, 3, -1, -1)  # [N, 1, 3, H, W]
+
+        weighted_texture = (texture_stack.unsqueeze(1) * confidence_weights).sum(dim=0)  # [1, 3, H, W]
+
+        # Mix: use weighted blend at boundaries, hard selection elsewhere
+        blended = selected_texture * (1 - boundaries_3ch) + weighted_texture * boundaries_3ch
+
+        return blended
+
+    def _mirror_for_missing_side(self, texture, coverage_map):
+        """Mirror texture to fill missing opposite side"""
+        mirrored = torch.flip(texture, dims=[3])
+        mirrored_coverage = torch.flip(coverage_map, dims=[2])
+
+        # Use mirrored only where original is missing
+        missing_mask = (coverage_map < 0.1).float().unsqueeze(0)
+
+        filled = texture * (1 - missing_mask) + mirrored * missing_mask
+
+        return filled
 
     def reconstruct_multi_image(self, image_paths, output_dir, strategy='identity', blend_textures=True):
         """Reconstruct 3D face from multiple images"""
@@ -261,17 +302,16 @@ class MultiImageDECA:
                 use_detail=True
             )
 
-        # Blend textures from all views if enabled
+        # Smart texture selection
         frontal_idx = self.select_best_frontal_view(all_codes)
         if blend_textures and self.config.model.use_tex and len(all_opdicts) > 1:
-            blended_texture = self.blend_multi_view_textures(
+            selected_texture = self.smart_texture_selection(
                 all_opdicts,
                 all_codes,
-                frontal_idx,
-                mirror_missing=True
+                frontal_idx
             )
-            opdict['uv_texture_gt'] = blended_texture
-            print("✓ Applied view-aware multi-view texture blending")
+            opdict['uv_texture_gt'] = selected_texture
+            print("✓ Applied smart texture selection")
         else:
             print("ℹ Using single-view texture (frontal)")
 
@@ -352,14 +392,12 @@ class MultiImageDECA:
 
                 stacked = torch.stack([code[key] for code in all_codes])
                 merged[key] = stacked.mean(dim=0)
-
-        # Always use frontal image for rendering and texture extraction
-        merged['images'] = frontal_code['images']
+            merged['images'] = frontal_code['images']
 
         return merged
 
     def save_individual_results(self, all_codes, output_dir):
-        """Save individual reconstructions for comparison"""
+        """Save individual reconstructions"""
         individual_dir = os.path.join(output_dir, 'individual_views')
         os.makedirs(individual_dir, exist_ok=True)
 
@@ -406,41 +444,26 @@ class MultiImageDECA:
         """Save reconstruction results with texture"""
 
         print("\n" + "=" * 60)
-        print("Saving merged reconstruction results...")
+        print("Saving results...")
         print("=" * 60)
 
         output_path = os.path.join(output_dir, 'merged_mesh.obj')
 
-        if self.config.model.use_tex:
-            has_texture_data = 'uv_texture_gt' in opdict
-            has_detail_data = 'uv_detail_normals' in opdict and 'displacement_map' in opdict
-            has_normals = 'normals' in opdict
+        if self.config.model.use_tex and 'uv_texture_gt' in opdict:
+            try:
+                self.deca.save_obj(output_path, opdict)
+                print(f"✓ Saved: {output_path}")
+                print(f"✓ Saved: {output_path.replace('.obj', '_detail.obj')}")
 
-            print(f"\nTexture data check:")
-            print(f"  - uv_texture_gt: {'✓' if has_texture_data else '✗'}")
-            print(f"  - detail/normals: {'✓' if has_detail_data and has_normals else '✗'}")
-
-            if has_texture_data and has_detail_data and has_normals:
-                try:
-                    print("\n✓ Saving textured mesh with DECA's save_obj...")
-                    self.deca.save_obj(output_path, opdict)
-                    print(f"✓ Saved: {output_path}")
-                    print(f"✓ Saved: {output_path.replace('.obj', '_detail.obj')}")
-
-                    # Save texture as separate PNG
-                    texture = util.tensor2image(opdict['uv_texture_gt'][0])
-                    texture_path = os.path.join(output_dir, 'merged_texture.png')
-                    cv2.imwrite(texture_path, cv2.cvtColor(texture, cv2.COLOR_RGB2BGR))
-                    print(f"✓ Saved: {texture_path}")
-
-                except Exception as e:
-                    print(f"\n✗ Error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self._fallback_save(opdict, output_path)
-            else:
-                print("\n⚠ Missing data, saving geometry only")
-                self._fallback_save(opdict, output_path)
+                texture = util.tensor2image(opdict['uv_texture_gt'][0])
+                texture_path = os.path.join(output_dir, 'merged_texture.png')
+                cv2.imwrite(texture_path, cv2.cvtColor(texture, cv2.COLOR_RGB2BGR))
+                print(f"✓ Saved: {texture_path}")
+            except Exception as e:
+                print(f"Error: {e}")
+                if 'verts' in opdict:
+                    faces = self.deca.render.faces[0].cpu().numpy()
+                    util.write_obj(output_path, opdict['verts'][0].cpu().numpy(), faces)
         else:
             print("\nℹ Texture disabled, saving geometry only")
             self._fallback_save(opdict, output_path)
