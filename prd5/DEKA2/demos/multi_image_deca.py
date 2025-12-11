@@ -1,5 +1,5 @@
 # Patched multi_image_deca.py
-# Includes DECA-compatible preprocessing fixes
+# Includes DECA-compatible preprocessing and texture support
 
 import os, sys
 import cv2
@@ -19,13 +19,14 @@ from decalib.utils import util
 from decalib.datasets import datasets
 from skimage.io import imread
 
+
 class MultiImageDECA:
     def __init__(self, config):
         self.deca = DECA(config=config)
         self.config = config
 
     def preprocess_image(self, img_path):
-        # Use DECA's native preprocessing pipeline
+        """Use DECA's native preprocessing pipeline"""
         testdata = datasets.TestData(img_path)
         image_tensor = testdata[0]['image'].unsqueeze(0)
         if self.config.use_gpu:
@@ -33,6 +34,7 @@ class MultiImageDECA:
         return image_tensor
 
     def reconstruct_multi_image(self, image_paths, output_dir, strategy='average'):
+        """Reconstruct 3D face from multiple images"""
         os.makedirs(output_dir, exist_ok=True)
 
         all_codes = []
@@ -40,7 +42,7 @@ class MultiImageDECA:
 
         print(f"Processing {len(image_paths)} images...")
         for idx, img_path in enumerate(image_paths):
-            print(f"Processing image {idx+1}/{len(image_paths)}: {img_path}")
+            print(f"Processing image {idx + 1}/{len(image_paths)}: {img_path}")
 
             # Preprocess using DECA face detection / cropping
             image_tensor = self.preprocess_image(img_path)
@@ -51,15 +53,19 @@ class MultiImageDECA:
             all_codes.append(codedict)
             all_images.append(image_tensor)
 
+        # Merge codes from all images
         merged_code = self.merge_codes(all_codes, strategy)
 
+        # Decode to get 3D reconstruction
         with torch.no_grad():
             opdict, visdict = self.deca.decode(merged_code)
 
+        # Save results with texture
         self.save_results(opdict, visdict, output_dir, all_images)
         return opdict, visdict
 
     def merge_codes(self, all_codes, strategy='average'):
+        """Merge parameter codes from multiple images"""
         merged = {}
 
         if strategy == 'average':
@@ -70,79 +76,79 @@ class MultiImageDECA:
                 merged[key] = stacked.mean(dim=0)
 
         elif strategy == 'best':
+            # Use the first image's codes
             merged = all_codes[0]
 
-        # Identity consistency
+        # Identity consistency - average shape and detail across all images
         if 'shape' in merged:
             merged['shape'] = torch.stack([code['shape'] for code in all_codes]).mean(dim=0)
         if 'detail' in merged:
             merged['detail'] = torch.stack([code['detail'] for code in all_codes]).mean(dim=0)
 
+        # Use the first image for rendering
         merged['images'] = all_codes[0]['images']
         return merged
 
     def save_results(self, opdict, visdict, output_dir, images):
-        """Save reconstruction results to disk"""
+        """Save reconstruction results with proper texture support"""
 
-        # Get faces from the renderer, not from FLAME
-        faces = self.deca.render.faces[0].cpu().numpy()
+        # Use DECA's native save_obj method which handles texture correctly
+        output_path = os.path.join(output_dir, 'multi_image_mesh.obj')
 
-        # Save 3D mesh
-        if 'verts' in opdict:
-            util.write_obj(
-                os.path.join(output_dir, 'multi_image_mesh.obj'),
-                opdict['verts'][0].cpu().numpy(),
-                faces
-            )
-            print(f"Saved mesh to {os.path.join(output_dir, 'multi_image_mesh.obj')}")
+        try:
+            # This will save both coarse mesh (.obj) and detailed mesh (_detail.obj)
+            self.deca.save_obj(output_path, opdict)
+            print(f"Saved mesh with texture to {output_path}")
+            print(f"Saved detailed mesh to {output_path.replace('.obj', '_detail.obj')}")
+        except Exception as e:
+            print(f"Error saving obj file: {e}")
+            print("Attempting manual save...")
 
-        # Save shape visualization
+            # Fallback: manual save without texture
+            if 'verts' in opdict:
+                faces = self.deca.render.faces[0].cpu().numpy()
+                util.write_obj(
+                    output_path,
+                    opdict['verts'][0].cpu().numpy(),
+                    faces
+                )
+                print(f"Saved mesh (without texture) to {output_path}")
+
+        # Save visualizations
         if 'shape_images' in visdict:
             shape_img = visdict['shape_images'][0].detach().cpu()
-            # Convert from tensor [C, H, W] to numpy [H, W, C] and scale to 0-255
             shape_img = shape_img.permute(1, 2, 0).numpy()
             shape_img = np.clip(shape_img * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(output_dir, 'shape.png'),
                         cv2.cvtColor(shape_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved shape image to {os.path.join(output_dir, 'shape.png')}")
+            print(f"Saved shape visualization")
 
-        # Save detail visualization if available
         if 'shape_detail_images' in visdict:
             detail_img = visdict['shape_detail_images'][0].detach().cpu()
             detail_img = detail_img.permute(1, 2, 0).numpy()
             detail_img = np.clip(detail_img * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(output_dir, 'detail.png'),
                         cv2.cvtColor(detail_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved detail image to {os.path.join(output_dir, 'detail.png')}")
+            print(f"Saved detail visualization")
 
-        # Save rendered image if available
         if 'rendered_images' in visdict:
             rendered_img = visdict['rendered_images'][0].detach().cpu()
             rendered_img = rendered_img.permute(1, 2, 0).numpy()
             rendered_img = np.clip(rendered_img * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(output_dir, 'rendered.png'),
                         cv2.cvtColor(rendered_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved rendered image to {os.path.join(output_dir, 'rendered.png')}")
+            print(f"Saved rendered image")
 
-        # Save input images visualization
-        if 'inputs' in visdict:
-            input_img = visdict['inputs'][0].detach().cpu()
-            input_img = input_img.permute(1, 2, 0).numpy()
-            input_img = np.clip(input_img * 255, 0, 255).astype(np.uint8)
-            cv2.imwrite(os.path.join(output_dir, 'input.png'),
-                        cv2.cvtColor(input_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved input image to {os.path.join(output_dir, 'input.png')}")
-
-        # Save landmarks visualization
         if 'landmarks2d' in visdict:
             lmk_img = visdict['landmarks2d'][0].detach().cpu()
             lmk_img = lmk_img.permute(1, 2, 0).numpy()
             lmk_img = np.clip(lmk_img * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(output_dir, 'landmarks.png'),
                         cv2.cvtColor(lmk_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved landmarks image to {os.path.join(output_dir, 'landmarks.png')}")
+            print(f"Saved landmarks visualization")
 
         print(f"\nAll results saved to {output_dir}")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-Image DECA Reconstruction')
@@ -161,6 +167,7 @@ def main():
 
     args = parser.parse_args()
 
+    # Load config
     from yacs.config import CfgNode as CN
     cfg = CN(new_allowed=True)
     cfg.use_gpu = args.device == 'cuda' and torch.cuda.is_available()
@@ -168,6 +175,18 @@ def main():
     if os.path.exists(args.config):
         cfg.merge_from_file(args.config)
 
+    # IMPORTANT: Check if texture is enabled
+    if hasattr(cfg, 'model') and hasattr(cfg.model, 'use_tex'):
+        if not cfg.model.use_tex:
+            print("\n" + "=" * 60)
+            print("WARNING: use_tex is set to False in config!")
+            print("To get textured meshes, set 'use_tex: True' in your config file")
+            print("and ensure you have the required texture data files:")
+            print("  - data/FLAME_texture.npz")
+            print("  - data/FLAME_albedo_from_BFM.npz (optional for better albedo)")
+            print("=" * 60 + "\n")
+
+    # Find all images in input folder
     image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
     image_paths = []
     for ext in image_extensions:
@@ -182,10 +201,11 @@ def main():
 
     print(f"Found {len(image_paths)} images")
 
+    # Run multi-image reconstruction
     multi_deca = MultiImageDECA(cfg)
     multi_deca.reconstruct_multi_image(image_paths, args.output_folder, strategy=args.strategy)
 
-    print("Multi-image reconstruction complete!")
+    print("\nMulti-image reconstruction complete!")
 
 
 if __name__ == '__main__':
